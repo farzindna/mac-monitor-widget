@@ -33,6 +33,9 @@ SOUND_CHIME = "/System/Library/Sounds/Tink.aiff"
 SOUND_VPN = "/System/Library/Sounds/Sosumi.aiff"   # VPN drop: must sound different from the internet-offline beep (Basso)
 LOCK_PATH = Path.home() / ".config" / "mac_monitor_widget.lock"
 FULL_W, MINI_W = 340, 176      # window widths: full card / small card (about the size of the macOS clock widget)
+GLASS_STYLE = 0      # NSGlassEffectView style: 0 = regular, 1 = clear (more see-through)
+GLASS_DARK = True    # force the dark glass appearance so the white text stays readable on any wallpaper
+GLASS_TINT = 0.25    # how much of the old dark card tint stays on top of the macOS glass (0 = none)
 VPN_NAME = "RocketTunnel"     # macOS network-service name; `scutil --nc list` shows it
 
 SWAP_WINDOW_TICKS = 10        # ~18 s of memory samples
@@ -482,6 +485,7 @@ class MacMonitorWidget(QWidget):
         self.mem_msg = ""
         self.shown_state = None
         self.test_until = 0.0
+        self.glass_scale = 1.0  # < 1 when the real macOS glass does the work and the card tint only helps readability
         self.glass = False      # real macOS blur (NSVisualEffectView) behind the card once installed
         self._fx = None
         self._card_state = "normal"
@@ -895,7 +899,7 @@ class MacMonitorWidget(QWidget):
         """
 
     def _alpha(self, solid, glass):
-        return glass if self.glass else solid
+        return round(glass * self.glass_scale, 3) if self.glass else solid
 
     def _update_card_style(self, state):
         self._card_state = state
@@ -1256,15 +1260,26 @@ class MacMonitorWidget(QWidget):
                 return
             if self._fx:
                 o.send(self._fx, "removeFromSuperview")
-            fx = o.send(o.send(o.cls("NSVisualEffectView"), "alloc"), "initWithFrame:", NSRect(0, 0, 10, 10), argtypes=[NSRect])
             L = ctypes.c_long
-            o.send(fx, "setMaterial:", 13, argtypes=[L])      # HUD window: dark, frosted
-            o.send(fx, "setBlendingMode:", 0, argtypes=[L])   # blur what is behind the window
-            o.send(fx, "setState:", 1, argtypes=[L])          # stay frosted even when the app is not active
-            o.send(fx, "setWantsLayer:", True, argtypes=[ctypes.c_bool])
-            layer = o.send(fx, "layer")
-            o.send(layer, "setCornerRadius:", 20.0, argtypes=[ctypes.c_double])
-            o.send(layer, "setMasksToBounds:", True, argtypes=[ctypes.c_bool])
+            glass_cls = o.cls("NSGlassEffectView")            # macOS 26+: the same "Liquid Glass" the system widgets use
+            if glass_cls:
+                fx = o.send(o.send(glass_cls, "alloc"), "initWithFrame:", NSRect(0, 0, 10, 10), argtypes=[NSRect])
+                o.send(fx, "setCornerRadius:", 20.0, argtypes=[ctypes.c_double])
+                o.send(fx, "setStyle:", GLASS_STYLE, argtypes=[L])
+                if GLASS_DARK:  # the glass turns light over a bright wallpaper and our white text would wash out; pin it to the dark look
+                    name = o.send(o.cls("NSString"), "stringWithUTF8String:", b"NSAppearanceNameDarkAqua", argtypes=[ctypes.c_char_p])
+                    o.send(fx, "setAppearance:", o.send(o.cls("NSAppearance"), "appearanceNamed:", name, argtypes=[ctypes.c_void_p]), argtypes=[ctypes.c_void_p])
+                self.glass_scale = GLASS_TINT
+            else:                                              # older macOS: plain frosted blur
+                fx = o.send(o.send(o.cls("NSVisualEffectView"), "alloc"), "initWithFrame:", NSRect(0, 0, 10, 10), argtypes=[NSRect])
+                o.send(fx, "setMaterial:", 13, argtypes=[L])      # HUD window: dark, frosted
+                o.send(fx, "setBlendingMode:", 0, argtypes=[L])   # blur what is behind the window
+                o.send(fx, "setState:", 1, argtypes=[L])          # stay frosted even when the app is not active
+                o.send(fx, "setWantsLayer:", True, argtypes=[ctypes.c_bool])
+                layer = o.send(fx, "layer")
+                o.send(layer, "setCornerRadius:", 20.0, argtypes=[ctypes.c_double])
+                o.send(layer, "setMasksToBounds:", True, argtypes=[ctypes.c_bool])
+                self.glass_scale = 1.0
             o.send(host, "addSubview:positioned:relativeTo:", fx, -1, view, argtypes=[ctypes.c_void_p, L, ctypes.c_void_p])  # below Qt's view
             self._objc, self._fx, self._fx_view, self._fx_host = o, fx, view, host
             self.glass = True
