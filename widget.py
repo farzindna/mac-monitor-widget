@@ -32,10 +32,12 @@ SOUND_WARN = "/System/Library/Sounds/Basso.aiff"
 SOUND_CHIME = "/System/Library/Sounds/Tink.aiff"
 SOUND_VPN = "/System/Library/Sounds/Sosumi.aiff"   # VPN drop: must sound different from the internet-offline beep (Basso)
 LOCK_PATH = Path.home() / ".config" / "mac_monitor_widget.lock"
-FULL_W, MINI_W = 340, 176      # window widths: full card / small card (about the size of the macOS clock widget)
+FULL_W, MINI_W = 356, 192      # window widths: full card / small card (about the size of the macOS clock widget)
+PANEL_RADIUS = 16                # corner radius of the solid panel (glass outside radius = PANEL_RADIUS + RIM - 1)
+RIM = 11                       # width of the glass frame around the solid panel (like the macOS clock widget)
 GLASS_STYLE = 0      # NSGlassEffectView style: 0 = regular, 1 = clear (more see-through)
-GLASS_DARK = True    # force the dark glass appearance so the white text stays readable on any wallpaper
-GLASS_TINT = 0.25    # how much of the old dark card tint stays on top of the macOS glass (0 = none)
+GLASS_DARK = False   # the text lives on the solid panel, so the glass rim can keep the light system look
+GLASS_TINT = 1.0     # unused by the rim layout; kept so the glass code path stays unchanged
 VPN_NAME = "RocketTunnel"     # macOS network-service name; `scutil --nc list` shows it
 
 SWAP_WINDOW_TICKS = 10        # ~18 s of memory samples
@@ -762,11 +764,19 @@ class MacMonitorWidget(QWidget):
         card_layout.addWidget(self.apps_container)
 
         self._init_mini()
+        # the card itself stays see-through (the real glass sits behind it); the solid panel inside leaves a glass rim around it
         card_outer = QVBoxLayout(self.card)
-        card_outer.setContentsMargins(0, 0, 0, 0)
+        card_outer.setContentsMargins(RIM, RIM, RIM, RIM)
         card_outer.setSpacing(0)
-        card_outer.addWidget(self.full_box)
-        card_outer.addWidget(self.mini_box)
+        self.panel = QFrame(self.card)
+        self.panel.setObjectName("panel")
+        panel_layout = QVBoxLayout(self.panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        panel_layout.addWidget(self.full_box)
+        panel_layout.addWidget(self.mini_box)
+        card_outer.addWidget(self.panel)
+        self._update_card_style(self._card_state)
         root_layout.addWidget(self.card)
         self.full_box.setVisible(not self.collapsed)
         self.mini_box.setVisible(self.collapsed)
@@ -779,7 +789,7 @@ class MacMonitorWidget(QWidget):
     def _init_mini(self):
         self.mini_box = QWidget(self.card)
         v = QVBoxLayout(self.mini_box)
-        v.setContentsMargins(14, 12, 14, 14)
+        v.setContentsMargins(12, 10, 12, 12)
         v.setSpacing(5)
         top = QHBoxLayout()
         self.mini_dot = QLabel("●", self.mini_box)
@@ -815,6 +825,7 @@ class MacMonitorWidget(QWidget):
 
     def _refresh_mini(self):
         """Copy the live values from the full card's labels, so the two cards can never disagree."""
+        self._keep_glass_awake()
         mono = "font-family: Menlo, monospace; font-weight: bold;"
         c = self._css_color(self.ping_value.styleSheet())
         up = "ms" in self.ping_value.text()
@@ -905,19 +916,21 @@ class MacMonitorWidget(QWidget):
         self._card_state = state
         if state == "danger":
             border = "2px solid rgba(239, 68, 68, 0.85);"
-            glow = f"background-color: rgba(60, 14, 20, {self._alpha(0.88, 0.58)});"
+            glow = "background-color: rgba(60, 14, 20, 0.94);"
         elif state == "warning":
             border = "1.5px solid rgba(245, 158, 11, 0.7);"
-            glow = f"background-color: rgba(50, 36, 10, {self._alpha(0.86, 0.55)});"
+            glow = "background-color: rgba(50, 36, 10, 0.94);"
         else:
-            border = "1px solid rgba(255, 255, 255, 0.18);"
-            glow = f"background-color: rgba(18, 24, 38, {self._alpha(0.82, 0.50)});"
+            border = "1px solid rgba(255, 255, 255, 0.10);"
+            glow = "background-color: rgba(16, 22, 36, 0.93);"
 
-        self.card.setStyleSheet(f"""
-            QFrame#card {{
+        if not hasattr(self, "panel"):
+            return
+        self.panel.setStyleSheet(f"""
+            QFrame#panel {{
                 {glow}
                 border: {border}
-                border-radius: 20px;
+                border-radius: {PANEL_RADIUS}px;
             }}
         """)
 
@@ -1153,19 +1166,19 @@ class MacMonitorWidget(QWidget):
         # Pulsing effect for danger state
         self.pulse_step = 1 - self.pulse_step
         if self.pulse_step == 1:
-            self.card.setStyleSheet(f"""
-                QFrame#card {{
-                    background-color: rgba(70, 15, 22, {self._alpha(0.92, 0.65)});
+            self.panel.setStyleSheet(f"""
+                QFrame#panel {{
+                    background-color: rgba(78, 16, 24, 0.97);
                     border: 2px solid rgba(239, 68, 68, 0.95);
-                    border-radius: 20px;
+                    border-radius: {PANEL_RADIUS}px;
                 }}
             """)
         else:
-            self.card.setStyleSheet(f"""
-                QFrame#card {{
-                    background-color: rgba(40, 14, 20, {self._alpha(0.85, 0.55)});
+            self.panel.setStyleSheet(f"""
+                QFrame#panel {{
+                    background-color: rgba(44, 14, 20, 0.94);
                     border: 1.5px solid rgba(239, 68, 68, 0.6);
-                    border-radius: 20px;
+                    border-radius: {PANEL_RADIUS}px;
                 }}
             """)
 
@@ -1264,7 +1277,7 @@ class MacMonitorWidget(QWidget):
             glass_cls = o.cls("NSGlassEffectView")            # macOS 26+: the same "Liquid Glass" the system widgets use
             if glass_cls:
                 fx = o.send(o.send(glass_cls, "alloc"), "initWithFrame:", NSRect(0, 0, 10, 10), argtypes=[NSRect])
-                o.send(fx, "setCornerRadius:", 20.0, argtypes=[ctypes.c_double])
+                o.send(fx, "setCornerRadius:", float(PANEL_RADIUS + RIM - 1), argtypes=[ctypes.c_double])
                 o.send(fx, "setStyle:", GLASS_STYLE, argtypes=[L])
                 if GLASS_DARK:  # the glass turns light over a bright wallpaper and our white text would wash out; pin it to the dark look
                     name = o.send(o.cls("NSString"), "stringWithUTF8String:", b"NSAppearanceNameDarkAqua", argtypes=[ctypes.c_char_p])
@@ -1288,6 +1301,14 @@ class MacMonitorWidget(QWidget):
             self._update_card_style(self._card_state)
         except Exception as e:
             print("glass not available:", e, file=sys.stderr)
+
+    def _keep_glass_awake(self):
+        """NSGlassEffectView dims itself ("subdued") whenever our window is not the key window, which is almost always."""
+        if self._fx and self.glass_scale is not None:
+            try:
+                self._objc.send(self._fx, "set_subduedState:", 0, argtypes=[ctypes.c_long])
+            except Exception:
+                pass
 
     def _place_glass(self):
         if not self._fx:
