@@ -34,7 +34,8 @@ SOUND_VPN = "/System/Library/Sounds/Sosumi.aiff"   # VPN drop: must sound differ
 LOCK_PATH = Path.home() / ".config" / "mac_monitor_widget.lock"
 FULL_W, MINI_W = 356, 192      # window widths: full card / small card (about the size of the macOS clock widget)
 PANEL_RADIUS = 16                # corner radius of the solid panel (glass outside radius = PANEL_RADIUS + RIM - 1)
-RIM = 11                       # width of the glass frame around the solid panel (like the macOS clock widget)
+RIM = 12                       # width of the glass frame around the solid panel (like the macOS clock widget)
+GLASS_SHADE = 0.32   # faint dark tint on the glass, like the system widgets (0 = milky system default)
 GLASS_STYLE = 0      # NSGlassEffectView style: 0 = regular, 1 = clear (more see-through)
 GLASS_DARK = False   # the text lives on the solid panel, so the glass rim can keep the light system look
 GLASS_TINT = 1.0     # unused by the rim layout; kept so the glass code path stays unchanged
@@ -921,7 +922,7 @@ class MacMonitorWidget(QWidget):
             border = "1.5px solid rgba(245, 158, 11, 0.7);"
             glow = "background-color: rgba(50, 36, 10, 0.94);"
         else:
-            border = "1px solid rgba(255, 255, 255, 0.10);"
+            border = "none;"  # no line of its own: the glass edge is the only frame
             glow = "background-color: rgba(16, 22, 36, 0.93);"
 
         if not hasattr(self, "panel"):
@@ -1274,11 +1275,19 @@ class MacMonitorWidget(QWidget):
             if self._fx:
                 o.send(self._fx, "removeFromSuperview")
             L = ctypes.c_long
+            # macOS draws its own window shadow around whatever is opaque; together with the glass's own shadow
+            # that made a second, offset frame under the card. The glass is the only frame we want.
+            o.send(win, "setHasShadow:", False, argtypes=[ctypes.c_bool])
             glass_cls = o.cls("NSGlassEffectView")            # macOS 26+: the same "Liquid Glass" the system widgets use
             if glass_cls:
                 fx = o.send(o.send(glass_cls, "alloc"), "initWithFrame:", NSRect(0, 0, 10, 10), argtypes=[NSRect])
                 o.send(fx, "setCornerRadius:", float(PANEL_RADIUS + RIM - 1), argtypes=[ctypes.c_double])
                 o.send(fx, "setStyle:", GLASS_STYLE, argtypes=[L])
+                if GLASS_SHADE > 0:  # a faint dark tint: the system widgets' glass sits a touch darker than the wallpaper, ours looked milky
+                    tint = o.send(o.cls("NSColor"), "colorWithWhite:alpha:", 0.0, GLASS_SHADE, argtypes=[ctypes.c_double, ctypes.c_double])
+                    o.send(fx, "setTintColor:", tint, argtypes=[ctypes.c_void_p])
+                # the glass's own drop shadow spills outside it and the window edge cut it into a faint hard rectangle
+                o.send(fx, "setClipsToBounds:", True, argtypes=[ctypes.c_bool])
                 if GLASS_DARK:  # the glass turns light over a bright wallpaper and our white text would wash out; pin it to the dark look
                     name = o.send(o.cls("NSString"), "stringWithUTF8String:", b"NSAppearanceNameDarkAqua", argtypes=[ctypes.c_char_p])
                     o.send(fx, "setAppearance:", o.send(o.cls("NSAppearance"), "appearanceNamed:", name, argtypes=[ctypes.c_void_p]), argtypes=[ctypes.c_void_p])
