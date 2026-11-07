@@ -24,10 +24,13 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QProgressBar, QPushButton, QFrame
+    QProgressBar, QPushButton, QFrame, QSizePolicy
 )
 
 CONFIG_PATH = Path.home() / ".config" / "mac_monitor_widget.json"
+WIFI_FILE = Path.home() / ".config" / "mac_monitor_wifi.json"  # written by helper/WifiName; stays on this Mac
+WIFI_APP = Path.home() / "Library" / "Application Support" / "mac-monitor-widget" / "WifiName.app"
+WIFI_STALE_S = 20  # older than this, the helper's answer is not believed
 SOUND_WARN = "/System/Library/Sounds/Basso.aiff"
 SOUND_CHIME = "/System/Library/Sounds/Tink.aiff"
 SOUND_VPN = "/System/Library/Sounds/Sosumi.aiff"   # VPN drop: must sound different from the internet-offline beep (Basso)
@@ -230,6 +233,85 @@ class VpnWorker(QThread):
         while self.running:
             self.state_result.emit(self.read_state())
             for _ in range(15):
+                if not self.running:
+                    return
+                time.sleep(0.1)
+
+    def stop(self):
+        self.running = False
+
+
+def active_interface(nwi_text):
+    """First real network interface in `scutil --nwi` output, skipping VPN tunnels (the Mac lists them first)."""
+    for name in re.findall(r"^\s+([a-z]+\d+) : flags", nwi_text, re.M):  # the summary line "REACH" is not an interface
+        if not name.startswith(("utun", "ipsec", "ppp", "tun", "tap", "lo", "awdl", "llw", "bridge")):
+            return name
+    return None
+
+
+def wifi_devices(hardware_ports_text):
+    """Device names of the Wi-Fi ports in `networksetup -listallhardwareports` output."""
+    return set(re.findall(r"Hardware Port: (?:Wi-Fi|AirPort)\s*\nDevice: (\w+)", hardware_ports_text))
+
+
+def network_label(iface, wifi_ifaces, helper_info, now):
+    """(name to show, why the Wi-Fi name is missing or ""). A stale helper file is never trusted."""
+    if iface is None:
+        return "بدون شبکه", ""
+    if iface not in wifi_ifaces:
+        return "کابل شبکه", ""
+    info = helper_info or {}
+    fresh = now - info.get("ts", 0) < WIFI_STALE_S
+    if fresh and info.get("ssid"):
+        return info["ssid"], ""
+    if not WIFI_APP.exists():
+        return "وای‌فای", "برنامه‌ی کمکی نصب نیست: zsh helper/build.sh"
+    if fresh and (info.get("auth") != "allowed" or not info.get("services", True)):
+        return "وای‌فای", "برای دیدن اسم شبکه، تو تنظیمات مک بخش Location Services اجازه‌ی WifiName رو بده."
+    return "وای‌فای", ""
+
+
+class NetworkWorker(QThread):
+    """Reports the name of the network the Mac is on. The Wi-Fi name itself comes from helper/WifiName (see HANDOFF)."""
+    network_result = pyqtSignal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.running = True
+        self._last_start = 0.0
+
+    @staticmethod
+    def _run(*cmd):
+        try:
+            return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3).stdout
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _read_helper():
+        try:
+            return json.loads(WIFI_FILE.read_text())
+        except Exception:
+            return None
+
+    def _start_helper(self, now):
+        """Start the helper if it is missing or silent. It exits by itself when this widget process is gone."""
+        if WIFI_APP.exists() and now - self._last_start > WIFI_STALE_S:
+            self._last_start = now
+            # `open` makes the helper its own app in macOS's eyes, so the permission belongs to it and not to Python.
+            self._run("open", "-n", "-g", "-j", str(WIFI_APP), "--args", "--parent", str(os.getpid()))
+
+    def run(self):
+        wifi_ifaces = wifi_devices(self._run("networksetup", "-listallhardwareports"))
+        self._start_helper(time.time())  # a helper from the previous run is already on its way out
+        while self.running:
+            now = time.time()
+            info = self._read_helper()
+            iface = active_interface(self._run("scutil", "--nwi"))
+            if iface in wifi_ifaces and now - (info or {}).get("ts", 0) >= WIFI_STALE_S:
+                self._start_helper(now)
+            self.network_result.emit(*network_label(iface, wifi_ifaces, info, now))
+            for _ in range(30):
                 if not self.running:
                     return
                 time.sleep(0.1)
@@ -620,6 +702,20 @@ class MacMonitorWidget(QWidget):
         card_layout.addWidget(self._create_divider())
 
         # --- PING SECTION ---
+        net_row = QHBoxLayout()
+        net_icon = QLabel("📶", self.card)
+        net_icon.setStyleSheet("font-size: 14px;")
+        net_title = QLabel("شبکه", self.card)
+        net_title.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 500;")
+        self.net_lbl = QLabel("...", self.card)
+        self.net_lbl.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: bold;")
+        self.net_lbl.setTextFormat(Qt.TextFormat.PlainText)  # a network name is someone else's text, never markup
+        net_row.addWidget(net_icon)
+        net_row.addWidget(net_title)
+        net_row.addStretch()
+        net_row.addWidget(self.net_lbl)
+        card_layout.addLayout(net_row)
+
         ping_header = QHBoxLayout()
         ping_icon = QLabel("🌐", self.card)
         ping_icon.setStyleSheet("font-size: 14px;")
@@ -798,6 +894,12 @@ class MacMonitorWidget(QWidget):
         top.addStretch()
         top.addWidget(self.mini_vpn)
         v.addLayout(top)
+        self.mini_net = QLabel("...", self.mini_box)
+        self.mini_net.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mini_net.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: bold;")
+        self.mini_net.setTextFormat(Qt.TextFormat.PlainText)
+        self.mini_net.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # a long name must not widen the card
+        v.addWidget(self.mini_net)
         self.mini_ping = QLabel("-- ms", self.mini_box)
         self.mini_ping.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(self.mini_ping)
@@ -821,6 +923,16 @@ class MacMonitorWidget(QWidget):
     def _css_color(sheet, default="#e2e8f0"):
         m = re.search(r"(?<![-\w])color:\s*([^;]+);", sheet or "")
         return m.group(1).strip() if m else default
+
+    def _on_network(self, name, why):
+        self.network_name = name
+        tip = f"{name}\n{why}" if why else name
+        # Elided on the small card only; the full name stays in the tooltip.
+        room = max(40, MINI_W - 2 * (10 + RIM + 12))
+        self.mini_net.setText(self.mini_net.fontMetrics().elidedText(name, Qt.TextElideMode.ElideMiddle, room))
+        self.mini_net.setToolTip(tip)
+        self.net_lbl.setText(self.net_lbl.fontMetrics().elidedText(name, Qt.TextElideMode.ElideMiddle, FULL_W - 150))
+        self.net_lbl.setToolTip(tip)
 
     def _refresh_mini(self):
         """Copy the live values from the full card's labels, so the two cards can never disagree."""
@@ -969,6 +1081,9 @@ class MacMonitorWidget(QWidget):
         self.vpn_worker = VpnWorker()
         self.vpn_worker.state_result.connect(self._on_vpn_state)
         self.vpn_worker.start()
+        self.net_worker = NetworkWorker()
+        self.net_worker.network_result.connect(self._on_network)
+        self.net_worker.start()
 
         # Memory Worker
         self.memory_worker = MemoryWorker()
@@ -1343,6 +1458,8 @@ class MacMonitorWidget(QWidget):
         self.memory_worker.stop()
         self.vpn_worker.stop()
         self.vpn_worker.wait()
+        self.net_worker.stop()
+        self.net_worker.wait()
         self.ping_worker.wait()
         self.memory_worker.wait()
         event.accept()
