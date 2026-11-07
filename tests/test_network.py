@@ -9,7 +9,7 @@ with_vpn = """IPv4 network interface information
    utun4 : flags      : 0x7 (IPv4,IPv6,DNS)
            address    : 10.0.0.1
      en1 : flags      : 0x5 (IPv4,DNS)
-           address    : 192.168.2.103
+           address    : 192.168.0.10
    REACH : flags 0x00000003 (Reachable,Transient Connection)
 """
 ok("VPN on: real interface found under the tunnel", widget.active_interface(with_vpn) == "en1")
