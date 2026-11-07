@@ -1,0 +1,20 @@
+from _setup import widget, app, ok, done
+w = widget.MacMonitorWidget(); w._set_collapsed(False); app.processEvents()
+sounds = []; w._play_sound = lambda p: sounds.append(p.split("/")[-1])
+cmds = []; widget.subprocess.Popen = lambda c, **k: cmds.append(c)
+mem = lambda p=1, u=0, r=0: {"used_gb": 8, "total_gb": 16, "used_pct": 50, "swap_used_mb": u, "swap_total_mb": 1024, "swap_recent_mb": r, "pressure": p, "top_apps": []}
+for i in range(10): w._on_ping_update(None, False); w._on_memory_update(mem())
+ok("offline: one beep over 10 cycles", sounds == ["Basso.aiff"] and w.alert_banner.isVisibleTo(w))
+w._on_ping_update(30.0, True); ok("online again hides banner", not w.alert_banner.isVisibleTo(w))
+sounds.clear(); w._on_memory_update(mem(u=900)); ok("old swap alone: normal, silent", w.mem_state == "normal" and not sounds)
+w._on_memory_update(mem(r=300)); ok("fresh swap alone: no alarm", w.mem_state == "normal" and not sounds)
+f = lambda *ss: [w._on_vpn_state(s) for s in ss]
+sounds.clear(); f("Disconnected", "Connecting", "Disconnected"); ok("vpn failed connect: silent", not sounds)
+f("Connected", "Disconnected", "Disconnected", "Disconnected"); ok("vpn sudden drop: one Sosumi + banner", sounds == ["Sosumi.aiff"] and w.vpn_dropped and "ناگهانی" in w.alert_banner.text())
+f("Connected"); ok("reconnect clears vpn banner", not w.vpn_dropped)
+sounds.clear(); w._toggle_vpn(); ok("own stop sends scutil stop", cmds[-1] == ["scutil", "--nc", "stop", widget.VPN_NAME])
+f("Disconnecting", "Disconnected"); ok("own stop: silent", not sounds and not w.vpn_dropped)
+w._toggle_vpn(); ok("button start sends scutil start", cmds[-1] == ["scutil", "--nc", "start", widget.VPN_NAME])
+sounds.clear(); f("Connecting", "Connected", "Reasserting", "Connected", "missing", "unknown"); ok("transient/missing: silent", not sounds)
+cmds.clear(); f("Connecting"); w._toggle_vpn(); ok("click ignored while connecting", not cmds)
+done()

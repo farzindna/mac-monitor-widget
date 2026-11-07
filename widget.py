@@ -42,8 +42,9 @@ GLASS_TINT = 1.0     # unused by the rim layout; kept so the glass code path sta
 VPN_NAME = "RocketTunnel"     # macOS network-service name; `scutil --nc list` shows it
 
 SWAP_WINDOW_TICKS = 10        # ~18 s of memory samples
-SWAP_WARN_MB = 10             # fresh swap in that window → warning
-SWAP_DANGER_MB = 100          # → danger
+SWAP_WARN_MB = 10             # fresh swap in that window → "busy" label only (macOS handles it; no colour, no sound)
+SWAP_HEAVY_MB = 500           # this much fresh swap in the window counts as heavy …
+HEAVY_HOLD_S = 90             # … but the card only turns amber once heavy load has lasted this long (still silent)
 TEST_HOLD_S = 4               # a simulated test state stays on screen this long before live data returns
 
 # Chip temperature colour stops (°C → RGB); colour is interpolated between them.
@@ -484,7 +485,8 @@ class MacMonitorWidget(QWidget):
         self.vpn_armed = False
         self.vpn_dropped = False
         self.vpn_user_off = False   # set by our own button, so that disconnect stays silent
-        self.mem_state = "normal"  # normal, warning, danger
+        self.mem_state = "normal"  # normal or warning (memory never goes "danger" any more)
+        self._heavy_since = None   # when the current stretch of heavy memory load began
         self.mem_msg = ""
         self.shown_state = None
         self.test_until = 0.0
@@ -498,10 +500,6 @@ class MacMonitorWidget(QWidget):
         self._init_ui()
         self._init_workers()
 
-        # Timer for pulsing alert effects
-        self.pulse_timer = QTimer(self)
-        self.pulse_timer.timeout.connect(self._toggle_pulse)
-        self.pulse_step = 0
 
     def _init_window_flags(self):
         # Frameless, translucent background
@@ -919,8 +917,8 @@ class MacMonitorWidget(QWidget):
             border = "2px solid rgba(239, 68, 68, 0.85);"
             glow = "background-color: rgba(60, 14, 20, 0.94);"
         elif state == "warning":
-            border = "1.5px solid rgba(245, 158, 11, 0.7);"
-            glow = "background-color: rgba(50, 36, 10, 0.94);"
+            border = "1px solid rgba(245, 158, 11, 0.55);"
+            glow = "background-color: rgba(16, 22, 36, 0.93);"
         else:
             border = "none;"  # no line of its own: the glass edge is the only frame
             glow = "background-color: rgba(16, 22, 36, 0.93);"
@@ -1045,24 +1043,30 @@ class MacMonitorWidget(QWidget):
         else:
             self.apps_container.setVisible(False)
 
-        # Memory alert = macOS's own pressure level + swap written in the last ~18 s.
-        # Total swap used is shown but never alerts on its own: macOS keeps it after pressure passes.
-        recent = f"{swap_recent_mb:.0f} MB"
-        if pressure >= 4 or swap_recent_mb >= SWAP_DANGER_MB:
-            self._set_mem_state("danger", f"⚠️ فشار حافظه بحرانیه و مک داره سواپ می‌کنه ({recent} در چند ثانیه‌ی اخیر). برنامه‌های سنگین رو ببند.")
-            self._update_bar_style("danger")
-            self.ram_status_badge.setText("فشار بحرانی!")
+        # Memory is information, not an alarm: a Mac swapping and compressing memory under load is normal and it copes.
+        # So memory never beeps, never blinks and never turns the card red (red + sound stay for internet / VPN drops).
+        # Only heavy load that LASTS (macOS's own critical level or heavy swapping, for HEAVY_HOLD_S) gives a calm amber edge.
+        heavy = pressure >= 4 or swap_recent_mb >= SWAP_HEAVY_MB
+        now = time.time()
+        if not heavy:
+            self._heavy_since = None
+        elif self._heavy_since is None:
+            self._heavy_since = now
+        if heavy and now - self._heavy_since >= HEAVY_HOLD_S:
+            mins = max(1, int((now - self._heavy_since) // 60))
+            self._set_mem_state("warning", f"رم {mins} دقیقه‌ست زیر بار سنگینه. مک داره هندلش می‌کنه؛ فقط اگه کند شد یه برنامه‌ی سنگین رو ببند.")
+            self._update_bar_style("warning")
+            self.ram_status_badge.setText("بار سنگین")
             self.ram_status_badge.setStyleSheet(
-                "background-color: rgba(239, 68, 68, 0.25); color: #f87171; "
+                "background-color: rgba(245, 158, 11, 0.16); color: #fbbf24; "
                 "padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: bold;"
             )
         elif pressure >= 2 or swap_recent_mb >= SWAP_WARN_MB:
-            why = "مک داره سواپ می‌کنه (" + recent + " در چند ثانیه‌ی اخیر)" if swap_recent_mb >= SWAP_WARN_MB else "فشار حافظه بالا رفته"
-            self._set_mem_state("warning", f"توجه: {why}. رم {pct:.0f}% پره.")
-            self._update_bar_style("warning")
-            self.ram_status_badge.setText("فشار رم بالا")
+            self._set_mem_state("normal", "")
+            self._update_bar_style("green")
+            self.ram_status_badge.setText("مک داره مدیریتش می‌کنه")
             self.ram_status_badge.setStyleSheet(
-                "background-color: rgba(245, 158, 11, 0.2); color: #fbbf24; "
+                "background-color: rgba(148, 163, 184, 0.16); color: #cbd5e1; "
                 "padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: bold;"
             )
         else:
@@ -1075,12 +1079,7 @@ class MacMonitorWidget(QWidget):
             )
 
     def _set_mem_state(self, state, msg):
-        if state != self.mem_state:
-            if state == "danger":
-                self._play_sound(SOUND_WARN)
-            elif state == "warning" and self.mem_state == "normal":
-                self._play_sound(SOUND_CHIME)
-            self.mem_state = state
+        self.mem_state = state  # silent on purpose: memory load is shown, never announced
         self.mem_msg = msg
         self._render_alerts()
 
@@ -1140,48 +1139,28 @@ class MacMonitorWidget(QWidget):
         self._render_alerts()
 
     def _render_alerts(self):
-        """One place decides banner, card colour and pulse from both alerts together."""
+        """One place decides banner and card colour from all alerts together."""
         msgs = (["هشدار: اتصال اینترنت قطع شد!"] if self.net_offline else []) \
             + ([f"هشدار: {VPN_NAME} ناگهانی قطع شد!"] if self.vpn_dropped else []) \
             + ([self.mem_msg] if self.mem_msg else [])
         if msgs:
             self.alert_banner.setText("\n".join(msgs))
+            loud = self.net_offline or self.vpn_dropped  # red only for real outages; a memory note stays calm amber
+            c = "239, 68, 68" if loud else "245, 158, 11"
+            self.alert_banner.setStyleSheet(
+                f"background-color: rgba({c}, {0.2 if loud else 0.12}); border: 1px solid rgba({c}, {0.5 if loud else 0.35}); "
+                f"color: {'#fca5a5' if loud else '#fcd34d'}; padding: 6px 10px; border-radius: 8px; font-size: 11px; font-weight: bold;")
             self.alert_banner.setVisible(True)
         else:
             self.alert_banner.setVisible(False)
 
-        state = "danger" if self.net_offline or self.vpn_dropped or self.mem_state == "danger" else self.mem_state
+        state = "danger" if self.net_offline or self.vpn_dropped else self.mem_state
         dot = {"danger": "#ef4444", "warning": "#f59e0b"}.get(state, "#10b981")
         self.status_dot.setStyleSheet(f"color: {dot}; font-size: 15px;")
-        pulse = self.mem_state == "danger"
-        if (state, pulse) == self.shown_state:
+        if state == self.shown_state:
             return
-        self.shown_state = (state, pulse)
-        if pulse:
-            self.pulse_timer.start(500)
-        else:
-            self.pulse_timer.stop()
-            self._update_card_style(state)
-
-    def _toggle_pulse(self):
-        # Pulsing effect for danger state
-        self.pulse_step = 1 - self.pulse_step
-        if self.pulse_step == 1:
-            self.panel.setStyleSheet(f"""
-                QFrame#panel {{
-                    background-color: rgba(78, 16, 24, 0.97);
-                    border: 2px solid rgba(239, 68, 68, 0.95);
-                    border-radius: {PANEL_RADIUS}px;
-                }}
-            """)
-        else:
-            self.panel.setStyleSheet(f"""
-                QFrame#panel {{
-                    background-color: rgba(44, 14, 20, 0.94);
-                    border: 1.5px solid rgba(239, 68, 68, 0.6);
-                    border-radius: {PANEL_RADIUS}px;
-                }}
-            """)
+        self.shown_state = state
+        self._update_card_style(state)
 
     def _toggle_sound(self):
         self.sound_enabled = not self.sound_enabled
