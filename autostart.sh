@@ -5,7 +5,8 @@
 # Closing the widget with ✕ exits cleanly and launchd leaves it closed until next login; a crash is restarted.
 LABEL=com.farzin.mac-monitor-widget
 PLIST=~/Library/LaunchAgents/$LABEL.plist
-WIDGET=/Volumes/ai-scientist/00_tools/mac-monitor-widget/widget.py
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WIDGET="$SCRIPT_DIR/widget.py"
 DOMAIN=gui/$(id -u)
 
 launchctl bootout $DOMAIN/$LABEL 2>/dev/null

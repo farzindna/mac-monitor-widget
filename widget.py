@@ -161,6 +161,7 @@ class PingWorker(QThread):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.running = True
+        self.consecutive_drops = 0
 
     def run(self):
         # Primary target is 8.8.8.8 via real ICMP ping, so the number matches `ping 8.8.8.8` in Terminal.
@@ -171,11 +172,11 @@ class PingWorker(QThread):
             is_online = False
             try:
                 res = subprocess.run(
-                    ["ping", "-c", "1", "-W", "1000", "8.8.8.8"],
+                    ["ping", "-c", "1", "-W", "2500", "8.8.8.8"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=2.0
+                    timeout=3.0
                 )
                 if res.returncode == 0:
                     m = re.search(r"time=([\d\.]+)\s*ms", res.stdout)
@@ -189,7 +190,7 @@ class PingWorker(QThread):
                 for host, port in tcp_hosts:
                     t0 = time.time()
                     try:
-                        s = socket.create_connection((host, port), timeout=1.2)
+                        s = socket.create_connection((host, port), timeout=2.0)
                         s.close()
                         latency = (time.time() - t0) * 1000.0
                         is_online = True
@@ -197,7 +198,21 @@ class PingWorker(QThread):
                     except Exception:
                         continue
 
-            self.ping_result.emit(latency, is_online)
+            if is_online:
+                self.consecutive_drops = 0
+                self.ping_result.emit(latency, True)
+            else:
+                self.consecutive_drops += 1
+                if self.consecutive_drops >= 2:
+                    self.ping_result.emit(None, False)
+                else:
+                    # Single dropped check: retry quickly before raising an alarm
+                    for _ in range(5):
+                        if not self.running:
+                            return
+                        time.sleep(0.1)
+                    continue
+
             # Sleep 1.5 seconds between checks
             for _ in range(15):
                 if not self.running:
