@@ -23,7 +23,7 @@ from PyQt6.QtGui import (
     QPainter, QColor, QLinearGradient, QPen, QPainterPath, QFont
 )
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QBoxLayout, QLabel,
     QProgressBar, QPushButton, QFrame, QSizePolicy
 )
 
@@ -262,6 +262,141 @@ def active_interface(nwi_text):
         if not name.startswith(("utun", "ipsec", "ppp", "tun", "tap", "lo", "awdl", "llw", "bridge")):
             return name
     return None
+
+
+def parse_netstat_bytes(netstat_text, iface):
+    """Extract (ibytes, obytes) for `iface` from `netstat -ibn` output, preferring the <Link#> row."""
+    if not iface:
+        return None
+    fallback = None
+    for line in netstat_text.splitlines():
+        parts = line.split()
+        if len(parts) < 10 or parts[0] != iface:
+            continue
+        if parts[-5].isdigit() and parts[-2].isdigit():
+            pair = (int(parts[-5]), int(parts[-2]))
+            if parts[2].startswith("<Link#"):
+                return pair
+            if fallback is None:
+                fallback = pair
+    return fallback
+
+
+def format_rate(bps, compact=False):
+    """Format bytes/sec as a human-readable speed string."""
+    bps = max(0.0, float(bps or 0.0))
+    if compact:
+        if bps < 1024 * 1024:
+            return f"{bps / 1024:.0f}K"
+        return f"{bps / (1024 * 1024):.1f}M"
+    if bps < 1024:
+        return f"{bps:.0f} B/s"
+    if bps < 1024 * 1024:
+        return f"{bps / 1024:.0f} KB/s"
+    return f"{bps / (1024 * 1024):.1f} MB/s"
+
+
+def format_bytes(total, compact=False):
+    """Format a byte count as KB / MB / GB."""
+    total = max(0, int(total or 0))
+    if compact:
+        if total < 1024 * 1024:
+            return f"{total / 1024:.0f}K"
+        if total < 1024 ** 3:
+            return f"{total / (1024 * 1024):.1f}M"
+        return f"{total / (1024 ** 3):.2f}G"
+    if total < 1024:
+        return f"{total} B"
+    if total < 1024 * 1024:
+        return f"{total / 1024:.0f} KB"
+    if total < 1024 ** 3:
+        return f"{total / (1024 * 1024):.1f} MB"
+    return f"{total / (1024 ** 3):.2f} GB"
+
+
+class TrafficTracker:
+    """Compute live RX/TX speeds and resettable session totals from cumulative interface counters."""
+
+    def __init__(self):
+        self.prev_iface = None
+        self.prev_pair = None
+        self.prev_ts = None
+        self.rx_total = 0
+        self.tx_total = 0
+
+    def reset(self):
+        self.rx_total = 0
+        self.tx_total = 0
+
+    def update(self, iface, pair, now):
+        if iface is None or pair is None:
+            self.prev_iface = iface
+            self.prev_pair = None
+            self.prev_ts = now
+            return {
+                "iface": iface,
+                "rx_bps": 0.0,
+                "tx_bps": 0.0,
+                "rx_total": self.rx_total,
+                "tx_total": self.tx_total,
+            }
+        ibytes, obytes = pair
+        rx_bps, tx_bps = 0.0, 0.0
+        if (
+            self.prev_pair is not None
+            and self.prev_iface == iface
+            and self.prev_ts is not None
+            and now > self.prev_ts
+        ):
+            prev_i, prev_o = self.prev_pair
+            if ibytes >= prev_i and obytes >= prev_o:
+                di = ibytes - prev_i
+                do = obytes - prev_o
+                dt = now - self.prev_ts
+                rx_bps = di / dt
+                tx_bps = do / dt
+                self.rx_total += di
+                self.tx_total += do
+        self.prev_iface = iface
+        self.prev_pair = (ibytes, obytes)
+        self.prev_ts = now
+        return {
+            "iface": iface,
+            "rx_bps": rx_bps,
+            "tx_bps": tx_bps,
+            "rx_total": self.rx_total,
+            "tx_total": self.tx_total,
+        }
+
+
+class TrafficWorker(QThread):
+    """Background worker polling live download/upload speed and cumulative usage on the active physical interface."""
+    traffic_result = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.running = True
+        self._reset_flag = False
+        self.tracker = TrafficTracker()
+
+    def reset(self):
+        self._reset_flag = True
+
+    def run(self):
+        while self.running:
+            if self._reset_flag:
+                self._reset_flag = False
+                self.tracker.reset()
+            iface = active_interface(NetworkWorker._run("scutil", "--nwi"))
+            pair = parse_netstat_bytes(NetworkWorker._run("netstat", "-ibn"), iface) if iface else None
+            self.traffic_result.emit(self.tracker.update(iface, pair, time.monotonic()))
+            for _ in range(10):
+                if not self.running:
+                    return
+                time.sleep(0.1)
+
+    def stop(self):
+        self.running = False
 
 
 def wifi_devices(hardware_ports_text):
@@ -585,6 +720,7 @@ class MacMonitorWidget(QWidget):
         self.mem_state = "normal"  # normal or warning (memory never goes "danger" any more)
         self._heavy_since = None   # when the current stretch of heavy memory load began
         self.mem_msg = ""
+        self.traffic_data = {"iface": None, "rx_bps": 0.0, "tx_bps": 0.0, "rx_total": 0, "tx_total": 0}
         self.shown_state = None
         self.test_until = 0.0
         self.glass_scale = 1.0  # < 1 when the real macOS glass does the work and the card tint only helps readability
@@ -663,6 +799,7 @@ class MacMonitorWidget(QWidget):
 
         # --- HEADER ---
         header_layout = QHBoxLayout()
+        header_layout.setDirection(QBoxLayout.Direction.RightToLeft)
         header_layout.setSpacing(8)
 
         self.status_dot = QLabel("●", self.card)
@@ -749,6 +886,34 @@ class MacMonitorWidget(QWidget):
         # Sparkline widget
         self.sparkline = SparklineWidget(self.card)
         card_layout.addWidget(self.sparkline)
+
+        # --- LIVE NETWORK TRAFFIC SECTION ---
+        traffic_rate_row = QHBoxLayout()
+        traffic_icon = QLabel("📶", self.card)
+        traffic_icon.setStyleSheet("font-size: 13px;")
+        traffic_title = QLabel("سرعت نت", self.card)
+        traffic_title.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 500;")
+        self.traffic_rate_lbl = QLabel("↓ 0 KB/s · ↑ 0 KB/s", self.card)
+        self.traffic_rate_lbl.setStyleSheet("color: #94a3b8; font-family: Menlo, monospace; font-size: 11px; font-weight: bold;")
+        traffic_rate_row.addWidget(traffic_icon)
+        traffic_rate_row.addWidget(traffic_title)
+        traffic_rate_row.addStretch()
+        traffic_rate_row.addWidget(self.traffic_rate_lbl)
+        card_layout.addLayout(traffic_rate_row)
+
+        traffic_total_row = QHBoxLayout()
+        self.traffic_total_lbl = QLabel("مصرف دوره: \u20660 KB\u2069", self.card)
+        self.traffic_total_lbl.setStyleSheet("color: #cbd5e1; font-size: 11px;")
+        self.traffic_reset_btn = QPushButton("↺", self.card)
+        self.traffic_reset_btn.setFixedSize(22, 22)
+        self.traffic_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.traffic_reset_btn.setToolTip("صفر کردن شمارنده مصرف نت")
+        self.traffic_reset_btn.setStyleSheet(self._button_style() + "QPushButton { font-size: 12px; padding: 0; }")
+        self.traffic_reset_btn.clicked.connect(self._reset_traffic)
+        traffic_total_row.addWidget(self.traffic_total_lbl)
+        traffic_total_row.addStretch()
+        traffic_total_row.addWidget(self.traffic_reset_btn)
+        card_layout.addLayout(traffic_total_row)
 
         # --- SEPARATOR ---
         card_layout.addWidget(self._create_divider())
@@ -895,12 +1060,12 @@ class MacMonitorWidget(QWidget):
         self.mini_timer.start(1000)
         self._refresh_mini()
 
-    # --- SMALL CARD: ping, RAM, VPN and chip temperature in a square about the size of the clock widget ---
+    # --- SMALL CARD: ping, traffic, RAM, VPN and chip temperature in a square about the size of the clock widget ---
     def _init_mini(self):
         self.mini_box = QWidget(self.card)
         v = QVBoxLayout(self.mini_box)
-        v.setContentsMargins(12, 10, 12, 12)
-        v.setSpacing(5)
+        v.setContentsMargins(12, 8, 12, 9)
+        v.setSpacing(3)
         top = QHBoxLayout()
         self.mini_dot = QLabel("●", self.mini_box)
         self.mini_dot.setStyleSheet("color: #10b981; font-size: 13px;")
@@ -919,8 +1084,12 @@ class MacMonitorWidget(QWidget):
         self.mini_ping.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(self.mini_ping)
         self.mini_spark = SparklineWidget(self.mini_box)
-        self.mini_spark.setFixedHeight(26)
+        self.mini_spark.setFixedHeight(22)
         v.addWidget(self.mini_spark)
+        self.mini_traffic = QLabel("↓0K ↑0K · 0K", self.mini_box)
+        self.mini_traffic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mini_traffic.setStyleSheet("color: #94a3b8; font-family: Menlo, monospace; font-size: 10px; font-weight: bold;")
+        v.addWidget(self.mini_traffic)
         row = QHBoxLayout()
         self.mini_ram = QLabel("", self.mini_box)
         self.mini_temp = QLabel("", self.mini_box)
@@ -960,6 +1129,18 @@ class MacMonitorWidget(QWidget):
         self.mini_spark.data = list(self.sparkline.data)
         self.mini_spark.line_color, self.mini_spark.fill_color = self.sparkline.line_color, self.sparkline.fill_color
         self.mini_spark.update()
+        td = self.traffic_data
+        total_b = td.get("rx_total", 0) + td.get("tx_total", 0)
+        self.mini_traffic.setText(
+            f"↓{format_rate(td.get('rx_bps', 0), compact=True)} "
+            f"↑{format_rate(td.get('tx_bps', 0), compact=True)} · "
+            f"{format_bytes(total_b, compact=True)}"
+        )
+        self.mini_traffic.setStyleSheet(
+            f"color: {self._css_color(self.traffic_rate_lbl.styleSheet(), '#94a3b8')}; "
+            f"font-family: Menlo, monospace; font-size: 10px; font-weight: bold;"
+        )
+        self.mini_traffic.setToolTip(self.traffic_total_lbl.toolTip())
         self.mini_dot.setStyleSheet(self.status_dot.styleSheet().replace("15px", "13px"))
         word = {"Connected": "وصل ✓", "Connecting": "...", "Reasserting": "...", "Disconnecting": "...",
                 "Disconnected": "قطع ✕" if self.vpn_dropped else "قطع"}.get(self.vpn_state, "—")
@@ -1105,6 +1286,11 @@ class MacMonitorWidget(QWidget):
         self.memory_worker.memory_result.connect(self._on_live_memory)
         self.memory_worker.start()
 
+        # Traffic Worker
+        self.traffic_worker = TrafficWorker()
+        self.traffic_worker.traffic_result.connect(self._on_live_traffic)
+        self.traffic_worker.start()
+
     def _testing(self):
         return time.time() < self.test_until
 
@@ -1115,6 +1301,40 @@ class MacMonitorWidget(QWidget):
     def _on_live_memory(self, data):
         if not self._testing():
             self._on_memory_update(data)
+
+    def _on_live_traffic(self, data):
+        if not self._testing():
+            self._on_traffic_update(data)
+
+    def _on_traffic_update(self, data):
+        self.traffic_data = dict(data)
+        rx_bps = data.get("rx_bps", 0.0)
+        tx_bps = data.get("tx_bps", 0.0)
+        rx_total = data.get("rx_total", 0)
+        tx_total = data.get("tx_total", 0)
+        total = rx_total + tx_total
+        active = (rx_bps + tx_bps) >= 1024
+        col = "#38bdf8" if active else "#94a3b8"
+        self.traffic_rate_lbl.setText(f"↓ {format_rate(rx_bps)} · ↑ {format_rate(tx_bps)}")
+        self.traffic_rate_lbl.setStyleSheet(
+            f"color: {col}; font-family: Menlo, monospace; font-size: 11px; font-weight: bold;"
+        )
+        self.traffic_total_lbl.setText(f"مصرف دوره: \u2066{format_bytes(total)}\u2069")
+        self.traffic_total_lbl.setToolTip(
+            f"دانلود کل: {format_bytes(rx_total)} | آپلود کل: {format_bytes(tx_total)}"
+        )
+
+    def _reset_traffic(self):
+        if hasattr(self, "traffic_worker"):
+            self.traffic_worker.reset()
+        self._on_traffic_update({
+            "iface": self.traffic_data.get("iface"),
+            "rx_bps": self.traffic_data.get("rx_bps", 0.0),
+            "tx_bps": self.traffic_data.get("tx_bps", 0.0),
+            "rx_total": 0,
+            "tx_total": 0,
+        })
+        self._refresh_mini()
 
     def _on_ping_update(self, latency, is_online):
         self.sparkline.add_point(latency)
@@ -1475,6 +1695,8 @@ class MacMonitorWidget(QWidget):
         self.vpn_worker.wait()
         self.net_worker.stop()
         self.net_worker.wait()
+        self.traffic_worker.stop()
+        self.traffic_worker.wait()
         self.ping_worker.wait()
         self.memory_worker.wait()
         event.accept()

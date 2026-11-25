@@ -13,6 +13,8 @@ ok("offline: short red text in mini", "قطع" in w.mini_ping.text() and "ارت
 w._on_ping_update(30.0, True)
 QTest.mouseClick(w, Qt.MouseButton.LeftButton, pos=QPoint(60, 60)); app.processEvents()
 ok("click opens full card", not w.collapsed and w.width() == widget.FULL_W)
+ok("header controls order: close, pin, sound, collapse", w.close_btn.x() < w.pin_btn.x() < w.sound_btn.x() < w.collapse_btn.x())
+ok("header title is right of controls", w.title_label.x() > w.collapse_btn.x())
 w.collapse_btn.click(); app.processEvents(); ok("collapse button shrinks", w.collapsed)
 QTest.mousePress(w, Qt.MouseButton.LeftButton, pos=QPoint(60, 60)); QTest.mouseMove(w, QPoint(90, 90)); QTest.mouseRelease(w, Qt.MouseButton.LeftButton, pos=QPoint(90, 90)); app.processEvents()
 ok("drag does not open", w.collapsed)
