@@ -51,5 +51,6 @@ ok("mini mirrors compact traffic", "↓256K" in w.mini_traffic.text() and "↑32
 w.traffic_reset_btn.click()
 app.processEvents()
 ok("reset button zeroes full and mini totals", "0 B" in w.traffic_total_lbl.text() and "· 0K" in w.mini_traffic.text())
+ok("tooltip styled dark for readability", "QToolTip" in w.styleSheet() and "#0f172a" in w.styleSheet() and "#f8fafc" in w.styleSheet())
 
 done()

@@ -778,6 +778,16 @@ class MacMonitorWidget(QWidget):
     def _init_ui(self):
         self.setFixedWidth(MINI_W if self.collapsed else FULL_W)
         self.move(self.saved_x, self.saved_y)
+        self.setStyleSheet("""
+            QToolTip {
+                background-color: #0f172a;
+                color: #f8fafc;
+                border: 1px solid rgba(148, 163, 184, 0.35);
+                border-radius: 6px;
+                padding: 5px 8px;
+                font-size: 11px;
+            }
+        """)
 
         # Outer root layout
         root_layout = QVBoxLayout(self)
