@@ -172,11 +172,11 @@ class PingWorker(QThread):
             is_online = False
             try:
                 res = subprocess.run(
-                    ["ping", "-c", "1", "-W", "2500", "8.8.8.8"],
+                    ["ping", "-c", "1", "-W", "3000", "8.8.8.8"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=3.0
+                    timeout=3.5
                 )
                 if res.returncode == 0:
                     m = re.search(r"time=([\d\.]+)\s*ms", res.stdout)
@@ -203,10 +203,10 @@ class PingWorker(QThread):
                 self.ping_result.emit(latency, True)
             else:
                 self.consecutive_drops += 1
-                if self.consecutive_drops >= 2:
+                if self.consecutive_drops >= 3:
                     self.ping_result.emit(None, False)
                 else:
-                    # Single dropped check: retry quickly before raising an alarm
+                    # Brief dropped check: retry quickly before raising an alarm
                     for _ in range(5):
                         if not self.running:
                             return
@@ -1134,7 +1134,8 @@ class MacMonitorWidget(QWidget):
         mono = "font-family: Menlo, monospace; font-weight: bold;"
         c = self._css_color(self.ping_value.styleSheet())
         up = "ms" in self.ping_value.text()
-        self.mini_ping.setText(self.ping_value.text() if up else "قطع ✕")  # the full "قطع ارتباط ✕" does not fit
+        slow = "کند" in self.ping_value.text()
+        self.mini_ping.setText(self.ping_value.text() if up else ("کند ⚠" if slow else "قطع ✕"))  # the full "قطع ارتباط ✕" does not fit
         self.mini_ping.setStyleSheet(f"color: {c}; font-size: {20 if up else 18}px; {mono}")
         self.mini_spark.data = list(self.sparkline.data)
         self.mini_spark.line_color, self.mini_spark.fill_color = self.sparkline.line_color, self.sparkline.fill_color
@@ -1153,8 +1154,8 @@ class MacMonitorWidget(QWidget):
         self.mini_traffic.setToolTip(self.traffic_total_lbl.toolTip())
         self.mini_dot.setStyleSheet(self.status_dot.styleSheet().replace("15px", "13px"))
         word = {"Connected": "وصل ✓", "Connecting": "...", "Reasserting": "...", "Disconnecting": "...",
-                "Disconnected": "قطع ✕" if self.vpn_dropped else "قطع"}.get(self.vpn_state, "—")
-        col = "#ef4444" if self.vpn_dropped else self._css_color(self.vpn_lbl.styleSheet(), "#94a3b8")
+                "Disconnected": "قطع ⚠" if self.vpn_dropped else "قطع"}.get(self.vpn_state, "—")
+        col = "#f59e0b" if self.vpn_dropped else self._css_color(self.vpn_lbl.styleSheet(), "#94a3b8")
         self.mini_vpn.setText("🛡 " + word)
         self.mini_vpn.setStyleSheet(f"color: {col}; font-size: 11px; font-weight: bold;")
         self.mini_ram.setText(f"⚡ {self.ram_bar.value()}%")
@@ -1350,10 +1351,17 @@ class MacMonitorWidget(QWidget):
         self.sparkline.add_point(latency)
 
         if not is_online or latency is None:
-            self.ping_value.setText("قطع ارتباط ✕")
-            self.ping_value.setStyleSheet("color: #ef4444; font-family: Menlo, monospace; font-size: 13px; font-weight: bold;")
-            self.sparkline.set_color_mode("red")
-            self._set_net_offline(True)
+            flow_bps = self.traffic_data.get("rx_bps", 0.0) + self.traffic_data.get("tx_bps", 0.0)
+            if flow_bps >= 1024 and getattr(self, "network_name", "") != "بدون شبکه":
+                self.ping_value.setText("کند (تایم‌اوت)")
+                self.ping_value.setStyleSheet("color: #f59e0b; font-family: Menlo, monospace; font-size: 12px; font-weight: bold;")
+                self.sparkline.set_color_mode("yellow")
+                self._set_net_offline(False)
+            else:
+                self.ping_value.setText("قطع ارتباط ✕")
+                self.ping_value.setStyleSheet("color: #ef4444; font-family: Menlo, monospace; font-size: 13px; font-weight: bold;")
+                self.sparkline.set_color_mode("red")
+                self._set_net_offline(True)
         elif latency < 80:
             self.ping_value.setText(f"{latency:.0f} ms")
             self.ping_value.setStyleSheet("color: #10b981; font-family: Menlo, monospace; font-size: 13px; font-weight: bold;")
@@ -1473,27 +1481,22 @@ class MacMonitorWidget(QWidget):
             "Connecting": ("در حال وصل‌شدن...", "#f59e0b"),
             "Reasserting": ("در حال وصل‌شدن...", "#f59e0b"),
             "Disconnecting": ("در حال قطع...", "#f59e0b"),
-            "Disconnected": ("قطع", "#ef4444" if self.vpn_dropped else "#94a3b8"),
+            "Disconnected": ("قطع", "#f59e0b" if self.vpn_dropped else "#94a3b8"),
             "missing": (f"{VPN_NAME} پیدا نشد", "#94a3b8"),
         }.get(s, ("نامشخص", "#94a3b8"))
         self.vpn_lbl.setText(text)
         self.vpn_lbl.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: bold;")
-        self.vpn_btn.setText("خاموش" if s in ("Connected", "Connecting", "Reasserting") else "روشن")
-        self.vpn_btn.setEnabled(s in ("Connected", "Disconnected"))
+        self.vpn_btn.setText("قطع")
+        self.vpn_btn.setVisible(s == "Connected")
+        self.vpn_btn.setEnabled(s == "Connected")
 
     def _toggle_vpn(self):
-        if self.vpn_state == "Connected":
-            self.vpn_user_off = True   # our own stop: must stay silent
-            cmd = "stop"
-        elif self.vpn_state == "Disconnected":
-            self.vpn_user_off = False
-            self.vpn_dropped = False
-            cmd = "start"
-        else:
+        if self.vpn_state != "Connected":
             return
+        self.vpn_user_off = True   # our own stop: must stay silent
         self.vpn_btn.setEnabled(False)
         try:
-            subprocess.Popen(["scutil", "--nc", cmd, VPN_NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(["scutil", "--nc", "stop", VPN_NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
         self._render_alerts()
@@ -1505,7 +1508,7 @@ class MacMonitorWidget(QWidget):
             + ([self.mem_msg] if self.mem_msg else [])
         if msgs:
             self.alert_banner.setText("\n".join(msgs))
-            loud = self.net_offline or self.vpn_dropped  # red only for real outages; a memory note stays calm amber
+            loud = self.net_offline  # red only for true internet outage; VPN drop & memory stay calm amber
             c = "239, 68, 68" if loud else "245, 158, 11"
             self.alert_banner.setStyleSheet(
                 f"background-color: rgba({c}, {0.2 if loud else 0.12}); border: 1px solid rgba({c}, {0.5 if loud else 0.35}); "
@@ -1514,7 +1517,7 @@ class MacMonitorWidget(QWidget):
         else:
             self.alert_banner.setVisible(False)
 
-        state = "danger" if self.net_offline or self.vpn_dropped else self.mem_state
+        state = "danger" if self.net_offline else ("warning" if (self.vpn_dropped or self.mem_state == "warning") else "normal")
         dot = {"danger": "#ef4444", "warning": "#f59e0b"}.get(state, "#10b981")
         self.status_dot.setStyleSheet(f"color: {dot}; font-size: 15px;")
         if state == self.shown_state:

@@ -53,4 +53,10 @@ app.processEvents()
 ok("reset button zeroes full and mini totals", "0 B" in w.traffic_total_lbl.text() and "· 0K" in w.mini_traffic.text())
 ok("tooltip styled dark for readability", "QToolTip" in w.styleSheet() and "#0f172a" in w.styleSheet() and "#f8fafc" in w.styleSheet())
 
+w._on_network("وای‌فای", "")
+w._on_traffic_update({"iface": "en1", "rx_bps": 20 * 1024, "tx_bps": 4 * 1024, "rx_total": 1000, "tx_total": 500})
+w._on_ping_update(None, False)
+w._refresh_mini()
+ok("ping timeout while traffic flowing stays yellow, not offline", not w.net_offline and "کند" in w.ping_value.text() and "کند" in w.mini_ping.text())
+
 done()

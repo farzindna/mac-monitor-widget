@@ -22,25 +22,29 @@ with mock.patch("subprocess.run") as mock_ping, mock.patch("socket.create_connec
     worker.run()
     ok("single drop does not emit offline", len(results) == 0 and worker.consecutive_drops == 1)
 
-# Test 2: Second consecutive failure emits (None, False)
+# Test 2: Second drop also does not emit offline; third consecutive drop emits (None, False)
 worker.consecutive_drops = 1
 with mock.patch("subprocess.run") as mock_ping, mock.patch("socket.create_connection") as mock_tcp:
     mock_ping.return_value = mock.Mock(returncode=2, stdout="")
     mock_tcp.side_effect = Exception("timeout")
-    
-    # Run one step
     worker.running = True
-    def stop_worker(*a, **k):
+    def fake_sleep_one(s):
         worker.running = False
-    worker.sleep = stop_worker
-    
-    # We mock time.sleep to stop worker so it doesn't loop
+    with mock.patch("time.sleep", side_effect=fake_sleep_one):
+        worker.run()
+    ok("second drop does not emit offline", len(results) == 0 and worker.consecutive_drops == 2)
+
+worker.consecutive_drops = 2
+with mock.patch("subprocess.run") as mock_ping, mock.patch("socket.create_connection") as mock_tcp:
+    mock_ping.return_value = mock.Mock(returncode=2, stdout="")
+    mock_tcp.side_effect = Exception("timeout")
+    worker.running = True
     def fake_sleep(s):
         worker.running = False
     with mock.patch("time.sleep", side_effect=fake_sleep):
         worker.run()
 
-    ok("second consecutive drop emits offline", (None, False) in results and worker.consecutive_drops >= 2)
+    ok("third consecutive drop emits offline", (None, False) in results and worker.consecutive_drops >= 3)
 
 # Test 3: Success resets consecutive_drops and emits online
 results.clear()
